@@ -1,78 +1,103 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 import requests
 import time
-import threading
 
 app = Flask(__name__)
 
-active_instances = []  # Список активных инстансов
-inactive_instances = []  # Список недоступных инстансов
-current_index = 0  # Индекс для стратегии Round Robin
+instances = []
+round_robin_index = 0
 
-@app.route('/health', methods=['GET'])
+@app.route('/health') # проверка состояни]я
 def health():
-    return jsonify({"instances": active_instances})
+    return 'status: healthy'
 
-@app.route('/process', methods=['GET'])
+@app.route('/process', methods=['GET', 'POST']) # перенаправка запросов на активный инстанс
 def process():
-    global current_index
-    if not active_instances:
-        return jsonify({"error": "No available instances"}), 503
+    return 'instance running'
 
-    # Стратегия Round Robin
-    instance = active_instances[current_index]
-    current_index = (current_index + 1) % len(active_instances)
-    try:
-        response = requests.get(f"http://{instance}/process")
-        return jsonify(response.json())
-    except requests.exceptions.RequestException:
-        return jsonify({"error": "Failed to connect to instance"}), 503
+def check_health():
+    global instances
+    while True:
+        for instance in instances:
+            try:
+                response = requests.get(f'http://{instance["ip"]}:{instance["port"]}/health', timeout=5)
+                if response.status_code != 200:
+                    instance["status"] = "Недоступен"
+                else:
+                    instance["status"] = "Доступен"
+            except requests.exceptions.RequestException:
+                instance["status"] = "Недоступен"
+        time.sleep(5)
 
-@app.route('/add_instance', methods=['POST'])
-def add_instance():
-    data = request.json
-    instance = f"{data['ip']}:{data['port']}"
-    if instance not in active_instances and instance not in inactive_instances:
-        active_instances.append(instance)
-    return jsonify({"message": "Instance added", "instances": active_instances})
+# Чтение портов из файла
+with open("ports.txt", 'r') as f:
+    ports = f.read().splitlines()
+    for port in ports:
+        if port.strip().isdigit():
+            instances.append({"ip": "127.0.0.1", "port": int(port.strip()), "status": ""})
 
-@app.route('/remove_instance', methods=['POST'])
-def remove_instance():
-    index = request.json['index']
-    if 0 <= index < len(active_instances):
-        active_instances.pop(index)
-        return jsonify({"message": "Instance removed", "instances": active_instances})
-    return jsonify({"error": "Invalid index"}), 400
+@app.route('/health')
+def health_instances():
+    active_instances = [instance for instance in instances if instance['status'] == 'Доступен']
+    return jsonify(instances=active_instances)
+
+@app.route('/process', methods=['GET', 'POST'])
+def process_request():
+    global round_robin_index
+    active_instances = [instance for instance in instances if instance['status'] == 'Доступен']
+
+    if len(active_instances) == 0:
+        return jsonify(error="Нет доступных приложений"), 503
+
+    instance = active_instances[round_robin_index]
+    round_robin_index = (round_robin_index + 1) % len(active_instances)
+
+    response = requests.get(f'http://{instance["ip"]}:{instance["port"]}/process')
+    return jsonify(response.json())
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return render_template('index.html', instances=instances)
 
-def check_health():
-    while True:
-        # Проверяем активные инстансы
-        for instance in active_instances[:]:
-            try:
-                response = requests.get(f"http://{instance}/health")
-                if response.status_code != 200:
-                    active_instances.remove(instance)
-                    inactive_instances.append(instance)
-            except requests.exceptions.RequestException:
-                active_instances.remove(instance)
-                inactive_instances.append(instance)
+@app.route('/add_instance', methods=['POST'])
+def add_instance():
+    ip = request.form['ip']
+    port = int(request.form['port'])
+    instances.append({"ip": ip, "port": port, "status": ''})
+    with open('ports.txt', 'a') as f:
+        f.write(f"{port}\n")
+    return redirect(url_for('index'))
 
-        # Проверяем недоступные инстансы
-        for instance in inactive_instances[:]:
-            try:
-                response = requests.get(f"http://{instance}/health")
-                if response.status_code == 200:
-                    inactive_instances.remove(instance)
-                    active_instances.append(instance)
-            except requests.exceptions.RequestException:
-                pass
+@app.route('/remove_instance', methods=['POST'])
+def remove_instance():
+    index = int(request.form['index']) - 1
+    if 0 <= index < len(instances):
+        instances.pop(index)
 
-        time.sleep(5)
+        with open('ports.txt', 'w') as f:
+            for instance in instances:
+                f.write(f"{instance['port']}\n")
+    return redirect(url_for('index'))
+
+@app.route('/<path:path>', methods=['GET', 'POST']) #перехват запросов и перенаправка на доступные инстансы
+def catch_all(path):
+    global round_robin_index
+    active_instances = [instance for instance in instances if instance['status'] == 'Доступен']
+
+    if len(active_instances) == 0:
+        return jsonify(error="Нет доступных приложений"), 503
+
+    instance = active_instances[round_robin_index]
+    round_robin_index = (round_robin_index + 1) % len(active_instances)
+
+    response = requests.request(
+        method=request.method,
+        url=f'http://{instance["ip"]}:{instance["port"]}/{path}',
+        data=request.data,
+        headers=request.headers,
+        cookies=request.cookies
+    )
+    return (response.text, response.status_code, response.headers.items())
 
 if __name__ == '__main__':
-    threading.Thread(target=check_health, daemon=True).start()
-    app.run(port=5000)
+    app.run(port=5001, debug=True)
