@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Balancer UI</title>
+</head>
+<body>
+    <h1>Load Balancer Management</h1>
+    <form id="addInstanceForm">
+        <input type="text" id="ip" placeholder="IP" required>
+        <input type="number" id="port" placeholder="Port" required>
+        <button type="submit">Add Instance</button>
+    </form>
+    <ul id="instanceList"></ul>
+
+    <script>
+        // Добавление нового инстанса
+        document.getElementById('addInstanceForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const ip = document.getElementById('ip').value;
+            const port = document.getElementById('port').value;
+            fetch('/add_instance', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ ip, port })
+            }).then(response => response.json())
+              .then(data => {
+                  console.log(data);
+                  updateInstanceList();
+              });
+        });
+
+        // Обновление списка инстансов
+        function updateInstanceList() {
+            fetch('/health')
+                .then(response => response.json())
+                .then(data => {
+                    const list = document.getElementById('instanceList');
+                    list.innerHTML = '';
+                    data.instances.forEach((instance, index) => {
+                        const li = document.createElement('li');
+                        li.textContent = instance;
+
+                        // Кнопка для удаления инстанса
+                        const button = document.createElement('button');
+                        button.textContent = 'Remove';
+                        button.onclick = () => {
+                            fetch('/remove_instance', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({ index })
+                            }).then(() => updateInstanceList());
+                        };
+
+                        li.appendChild(button);
+                        list.appendChild(li);
+                    });
+                });
+        }
+
+        // Автоматическое обновление списка каждые 5 секунд
+        setInterval(updateInstanceList, 5000);
+    </script>
+</body>
+</html>
